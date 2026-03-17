@@ -324,6 +324,7 @@ export default function Game() {
   const [multiplayerRoom, setMultiplayerRoom] = useState<any>(null);
   const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [multiplayerWinner, setMultiplayerWinner] = useState<any>(null);
+  const [errorMsg, setErrorMsg] = useState('');
   const distanceRef = useRef(0);
   
   // Powerup timers (in frames, 60fps)
@@ -386,6 +387,15 @@ export default function Game() {
       setMultiplayerRoom(room);
     });
     
+    socketRef.current.on('room_created', (id: string) => {
+      setRoomId(id);
+      setErrorMsg('');
+    });
+    
+    socketRef.current.on('error', (msg: string) => {
+      setErrorMsg(msg);
+    });
+    
     socketRef.current.on('game_started', (room) => {
       setMultiplayerRoom(room);
       setIsMultiplayer(true);
@@ -439,6 +449,12 @@ export default function Game() {
   const joinRoom = () => {
     if (roomId && socketRef.current) {
       socketRef.current.emit('join_room', roomId, playerName);
+    }
+  };
+
+  const createRoom = () => {
+    if (socketRef.current) {
+      socketRef.current.emit('create_room', playerName);
     }
   };
 
@@ -1733,18 +1749,29 @@ export default function Game() {
                   <input 
                     type="text" 
                     value={roomId}
-                    onChange={(e) => setRoomId(e.target.value)}
+                    onChange={(e) => { setRoomId(e.target.value.toUpperCase()); setErrorMsg(''); }}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-emerald-500 uppercase"
-                    placeholder="Enter room code"
+                    placeholder="Enter 5-letter code to join"
                   />
                 </div>
-                <button 
-                  onClick={joinRoom}
-                  disabled={!roomId}
-                  className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-900 font-bold py-3 rounded-lg mt-2 transition-colors"
-                >
-                  Join / Create Room
-                </button>
+                {errorMsg && (
+                  <div className="text-red-500 text-sm">{errorMsg}</div>
+                )}
+                <div className="flex gap-2 mt-2">
+                  <button 
+                    onClick={joinRoom}
+                    disabled={!roomId || roomId.length !== 5}
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-900 font-bold py-3 rounded-lg transition-colors"
+                  >
+                    Join Room
+                  </button>
+                  <button 
+                    onClick={createRoom}
+                    className="flex-1 bg-blue-500 hover:bg-blue-400 text-white font-bold py-3 rounded-lg transition-colors"
+                  >
+                    Create Room
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="flex flex-col gap-4">

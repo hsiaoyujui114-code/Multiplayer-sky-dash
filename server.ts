@@ -49,19 +49,51 @@ async function startServer() {
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
 
-    socket.on("join_room", (roomId: string, playerName: string) => {
+    socket.on("create_room", (playerName: string) => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      let roomId = '';
+      do {
+        roomId = '';
+        for (let i = 0; i < 5; i++) {
+          roomId += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+      } while (rooms[roomId]);
+
       socket.join(roomId);
-      
+      rooms[roomId] = {
+        id: roomId,
+        players: {},
+        state: 'waiting',
+        seed: Math.random(),
+        startTime: 0,
+        goalDistance: GOAL_DISTANCE
+      };
+
+      const room = rooms[roomId];
+      room.players[socket.id] = {
+        id: socket.id,
+        roomId,
+        name: playerName || `Player 1`,
+        x: 100,
+        y: 300,
+        progress: 0,
+        coins: 0,
+        isFinished: false,
+        isDead: false,
+        finishTime: 0
+      };
+
+      socket.emit("room_created", roomId);
+      io.to(roomId).emit("room_update", room);
+    });
+
+    socket.on("join_room", (roomId: string, playerName: string) => {
       if (!rooms[roomId]) {
-        rooms[roomId] = {
-          id: roomId,
-          players: {},
-          state: 'waiting',
-          seed: Math.random(),
-          startTime: 0,
-          goalDistance: GOAL_DISTANCE
-        };
+        socket.emit("error", "Room does not exist");
+        return;
       }
+
+      socket.join(roomId);
 
       const room = rooms[roomId];
       if (room.state !== 'waiting') {
