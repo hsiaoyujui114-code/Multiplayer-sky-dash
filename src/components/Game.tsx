@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Trophy, Shield, Zap, Star, Crosshair, Play, RotateCcw, History, X, Flag, ChevronRight, Plane, Rocket, Orbit, Users } from 'lucide-react';
-import { io, Socket } from 'socket.io-client';
+import { Peer, DataConnection } from 'peerjs';
 
 class SeededRandom {
   private seed: number;
@@ -318,7 +318,9 @@ export default function Game() {
   const [progress, setProgress] = useState(0); // 0 to 100
   
   // Multiplayer states
-  const socketRef = useRef<Socket | null>(null);
+  const peerRef = useRef<Peer | null>(null);
+  const connectionsRef = useRef<DataConnection[]>([]);
+  const isHostRef = useRef(false);
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [multiplayerRoom, setMultiplayerRoom] = useState<any>(null);
@@ -381,46 +383,6 @@ export default function Game() {
 
   // Load history and ship on mount
   useEffect(() => {
-    socketRef.current = io();
-    
-    socketRef.current.on('room_update', (room) => {
-      setMultiplayerRoom(room);
-    });
-    
-    socketRef.current.on('room_created', (id: string) => {
-      setRoomId(id);
-      setErrorMsg('');
-    });
-    
-    socketRef.current.on('error', (msg: string) => {
-      setErrorMsg(msg);
-    });
-    
-    socketRef.current.on('game_started', (room) => {
-      setMultiplayerRoom(room);
-      setIsMultiplayer(true);
-      startGame('medium', true, room.seed);
-    });
-    
-    socketRef.current.on('players_update', (players) => {
-      setMultiplayerRoom((prev: any) => prev ? { ...prev, players } : null);
-    });
-    
-    socketRef.current.on('game_over', (room) => {
-      setMultiplayerRoom(room);
-      setGameState('multiplayer_finished');
-      isPlayingRef.current = false;
-      
-      let winner = null;
-      for (const id in room.players) {
-        const p = room.players[id];
-        if (!winner || (p.isFinished && !winner.isFinished) || (p.isFinished && winner.isFinished && p.finishTime < winner.finishTime) || (!p.isFinished && !winner.isFinished && p.progress > winner.progress)) {
-          winner = p;
-        }
-      }
-      setMultiplayerWinner(winner);
-    });
-
     const savedHistory = localStorage.getItem('skyDashHistoryV2');
     if (savedHistory) {
       try {
@@ -442,25 +404,188 @@ export default function Game() {
     }
 
     return () => {
-      socketRef.current?.disconnect();
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
     };
   }, []);
 
   const joinRoom = () => {
-    if (roomId && socketRef.current) {
-      socketRef.current.emit('join_room', roomId, playerName);
+    if (roomId) {
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
+      const peer = new Peer();
+      
+      peer.on('open', (id) => {
+        isHostRef.current = false;
+        const conn = peer.connect(roomId);
+        
+        conn.on('open', () => {
+          connectionsRef.current = [conn];
+          conn.send({ type: 'join', name: playerName });
+        });
+        
+        conn.on('data', (data: any) => {
+          if (data.type === 'room_update') {
+            setMultiplayerRoom(data.room);
+          } else if (data.type === 'game_started') {
+            setMultiplayerRoom(data.room);
+            setIsMultiplayer(true);
+            startGame('medium', true, data.room.seed);
+          } else if (data.type === 'players_update') {
+            setMultiplayerRoom((prev: any) => prev ? { ...prev, players: data.players } : null);
+          } else if (data.type === 'game_over') {
+            setMultiplayerRoom(data.room);
+            setGameState('multiplayer_finished');
+            isPlayingRef.current = false;
+            
+            let winner = null;
+            for (const pid in data.room.players) {
+              const p = data.room.players[pid];
+              if (!winner || (p.isFinished && !winner.isFinished) || (p.isFinished && winner.isFinished && p.finishTime < winner.finishTime) || (!p.isFinished && !winner.isFinished && p.progress > winner.progress)) {
+                winner = p;
+              }
+            }
+            setMultiplayerWinner(winner);
+          } else if (data.type === 'error') {
+            setErrorMsg(data.msg);
+          }
+        });
+        
+        conn.on('close', () => {
+          setErrorMsg('Connection to host lost');
+          setMultiplayerRoom(null);
+          setIsMultiplayer(false);
+          setGameState('start');
+        });
+        
+        conn.on('error', (err) => {
+          setErrorMsg(err.message);
+        });
+      });
+      
+      peer.on('error', (err) => {
+        setErrorMsg(err.message);
+      });
+      
+      peerRef.current = peer;
     }
   };
 
   const createRoom = () => {
-    if (socketRef.current) {
-      socketRef.current.emit('create_room', playerName);
+    if (peerRef.current) {
+      peerRef.current.destroy();
     }
+    const code = Math.random().toString(36).substring(2, 7).toUpperCase();
+    const peer = new Peer(code);
+    
+    peer.on('open', (id) => {
+      setRoomId(id);
+      setErrorMsg('');
+      isHostRef.current = true;
+      setMultiplayerRoom({
+        id,
+        players: {
+          [id]: { id, name: playerName || 'Host', progress: 0, isFinished: false, isDead: false, finishTime: 0, x: 100, y: 300, coins: 0 }
+        },
+        state: 'waiting',
+        seed: Math.random(),
+        goalDistance: 10000
+      });
+    });
+
+    peer.on('connection', (conn) => {
+      connectionsRef.current.push(conn);
+      
+      conn.on('data', (data: any) => {
+        if (data.type === 'join') {
+          setMultiplayerRoom((prev: any) => {
+            if (!prev) return prev;
+            if (prev.state !== 'waiting') {
+              conn.send({ type: 'error', msg: 'Room is already playing' });
+              return prev;
+            }
+            const newRoom = { ...prev };
+            newRoom.players[conn.peer] = {
+              id: conn.peer,
+              name: data.name || `Player ${Object.keys(newRoom.players).length + 1}`,
+              progress: 0,
+              isFinished: false,
+              isDead: false,
+              finishTime: 0,
+              x: 100,
+              y: 300,
+              coins: 0
+            };
+            // Broadcast to all
+            connectionsRef.current.forEach(c => c.send({ type: 'room_update', room: newRoom }));
+            return newRoom;
+          });
+        } else if (data.type === 'player_update') {
+          setMultiplayerRoom((prev: any) => {
+            if (!prev) return prev;
+            const newRoom = { ...prev };
+            if (newRoom.players[conn.peer]) {
+              newRoom.players[conn.peer] = { ...newRoom.players[conn.peer], ...data.update };
+            }
+            // Broadcast to all
+            connectionsRef.current.forEach(c => c.send({ type: 'players_update', players: newRoom.players }));
+            
+            // Check game over
+            const allFinished = Object.values(newRoom.players).every((p: any) => p.isFinished || p.isDead);
+            if (allFinished && newRoom.state === 'playing') {
+              newRoom.state = 'finished';
+              connectionsRef.current.forEach(c => c.send({ type: 'game_over', room: newRoom }));
+              
+              setGameState('multiplayer_finished');
+              isPlayingRef.current = false;
+              
+              let winner = null;
+              for (const pid in newRoom.players) {
+                const p = newRoom.players[pid] as any;
+                if (!winner || (p.isFinished && !winner.isFinished) || (p.isFinished && winner.isFinished && p.finishTime < winner.finishTime) || (!p.isFinished && !winner.isFinished && p.progress > winner.progress)) {
+                  winner = p;
+                }
+              }
+              setMultiplayerWinner(winner);
+            }
+            
+            return newRoom;
+          });
+        }
+      });
+      
+      conn.on('close', () => {
+        connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+        setMultiplayerRoom((prev: any) => {
+          if (!prev) return prev;
+          const newRoom = { ...prev };
+          delete newRoom.players[conn.peer];
+          connectionsRef.current.forEach(c => c.send({ type: 'room_update', room: newRoom }));
+          return newRoom;
+        });
+      });
+      
+      conn.on('error', (err) => {
+        console.error('Connection error:', err);
+      });
+    });
+    
+    peer.on('error', (err) => {
+      setErrorMsg(err.message);
+    });
+    
+    peerRef.current = peer;
   };
 
   const startMultiplayerGame = () => {
-    if (socketRef.current && multiplayerRoom) {
-      socketRef.current.emit('start_game', multiplayerRoom.id);
+    if (isHostRef.current && multiplayerRoom) {
+      const newRoom = { ...multiplayerRoom, state: 'playing', startTime: Date.now() };
+      setMultiplayerRoom(newRoom);
+      connectionsRef.current.forEach(c => c.send({ type: 'game_started', room: newRoom }));
+      setIsMultiplayer(true);
+      startGame('medium', true, newRoom.seed);
     }
   };
 
@@ -619,13 +744,47 @@ export default function Game() {
       distanceRef.current += currentSpeed;
     }
 
-    if (isMultiplayer && frameCountRef.current % 3 === 0 && socketRef.current && multiplayerRoom) {
-      socketRef.current.emit('update_player', multiplayerRoom.id, {
+    if (isMultiplayer && frameCountRef.current % 3 === 0 && peerRef.current && multiplayerRoom) {
+      const update = {
         y: player.y,
         progress: distanceRef.current,
         coins: scoreRef.current,
         isDead: isDeadRef.current
-      });
+      };
+      
+      if (isHostRef.current) {
+        setMultiplayerRoom((prev: any) => {
+          if (!prev) return prev;
+          const newRoom = { ...prev };
+          if (newRoom.players[peerRef.current!.id]) {
+            newRoom.players[peerRef.current!.id] = { ...newRoom.players[peerRef.current!.id], ...update };
+          }
+          connectionsRef.current.forEach(c => c.send({ type: 'players_update', players: newRoom.players }));
+          
+          // Check game over
+          const allFinished = Object.values(newRoom.players).every((p: any) => p.isFinished || p.isDead);
+          if (allFinished && newRoom.state === 'playing') {
+            newRoom.state = 'finished';
+            connectionsRef.current.forEach(c => c.send({ type: 'game_over', room: newRoom }));
+            
+            setGameState('multiplayer_finished');
+            isPlayingRef.current = false;
+            
+            let winner = null;
+            for (const pid in newRoom.players) {
+              const p = newRoom.players[pid] as any;
+              if (!winner || (p.isFinished && !winner.isFinished) || (p.isFinished && winner.isFinished && p.finishTime < winner.finishTime) || (!p.isFinished && !winner.isFinished && p.progress > winner.progress)) {
+                winner = p;
+              }
+            }
+            setMultiplayerWinner(winner);
+          }
+          
+          return newRoom;
+        });
+      } else {
+        connectionsRef.current[0]?.send({ type: 'player_update', update });
+      }
     }
 
     if (frameCountRef.current % 300 === 0) {
@@ -915,13 +1074,47 @@ export default function Game() {
     
     if (isMultiplayer) {
       isDeadRef.current = true;
-      if (socketRef.current && multiplayerRoom) {
-        socketRef.current.emit('update_player', multiplayerRoom.id, {
+      if (peerRef.current && multiplayerRoom) {
+        const update = {
           y: playerRef.current.y,
           progress: distanceRef.current,
           coins: scoreRef.current,
           isDead: true
-        });
+        };
+        
+        if (isHostRef.current) {
+          setMultiplayerRoom((prev: any) => {
+            if (!prev) return prev;
+            const newRoom = { ...prev };
+            if (newRoom.players[peerRef.current!.id]) {
+              newRoom.players[peerRef.current!.id] = { ...newRoom.players[peerRef.current!.id], ...update };
+            }
+            connectionsRef.current.forEach(c => c.send({ type: 'players_update', players: newRoom.players }));
+            
+            // Check game over
+            const allFinished = Object.values(newRoom.players).every((p: any) => p.isFinished || p.isDead);
+            if (allFinished && newRoom.state === 'playing') {
+              newRoom.state = 'finished';
+              connectionsRef.current.forEach(c => c.send({ type: 'game_over', room: newRoom }));
+              
+              setGameState('multiplayer_finished');
+              isPlayingRef.current = false;
+              
+              let winner = null;
+              for (const pid in newRoom.players) {
+                const p = newRoom.players[pid] as any;
+                if (!winner || (p.isFinished && !winner.isFinished) || (p.isFinished && winner.isFinished && p.finishTime < winner.finishTime) || (!p.isFinished && !winner.isFinished && p.progress > winner.progress)) {
+                  winner = p;
+                }
+              }
+              setMultiplayerWinner(winner);
+            }
+            
+            return newRoom;
+          });
+        } else {
+          connectionsRef.current[0]?.send({ type: 'player_update', update });
+        }
       }
     } else {
       isPlayingRef.current = false;
@@ -1140,7 +1333,7 @@ export default function Game() {
     // Draw other multiplayer players
     if (isMultiplayer && multiplayerRoom) {
       Object.values(multiplayerRoom.players).forEach((p: any) => {
-        if (p.id !== socketRef.current?.id) {
+        if (p.id !== peerRef.current?.id) {
           ctx.save();
           const relativeX = player.x + (p.progress - distanceRef.current);
           ctx.translate(relativeX + player.width / 2, p.y + player.height / 2);
@@ -1687,7 +1880,7 @@ export default function Game() {
                   <div key={p.id} className="flex justify-between items-center bg-slate-900/50 p-3 rounded-lg">
                     <div className="flex items-center gap-3">
                       <span className="text-slate-500 font-mono w-6">#{index + 1}</span>
-                      <span className={p.id === socketRef.current?.id ? 'text-emerald-400 font-bold' : 'text-white'}>
+                      <span className={p.id === peerRef.current?.id ? 'text-emerald-400 font-bold' : 'text-white'}>
                         {p.name}
                       </span>
                     </div>
@@ -1785,18 +1978,35 @@ export default function Game() {
                   <div className="bg-slate-900 rounded-lg border border-slate-700 p-2 max-h-40 overflow-y-auto">
                     {Object.values(multiplayerRoom.players).map((p: any) => (
                       <div key={p.id} className="flex items-center gap-2 p-2 text-white">
-                        <div className={`w-2 h-2 rounded-full ${p.id === socketRef.current?.id ? 'bg-emerald-500' : 'bg-slate-500'}`} />
-                        {p.name} {p.id === socketRef.current?.id && '(You)'}
+                        <div className={`w-2 h-2 rounded-full ${p.id === peerRef.current?.id ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+                        {p.name} {p.id === peerRef.current?.id && '(You)'}
                       </div>
                     ))}
                   </div>
                 </div>
                 
+                {isHostRef.current ? (
+                  <button 
+                    onClick={startMultiplayerGame}
+                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-bold py-3 rounded-lg mt-4 transition-colors"
+                  >
+                    Start Game
+                  </button>
+                ) : (
+                  <div className="w-full bg-slate-800 text-slate-400 font-bold py-3 rounded-lg mt-4 text-center border border-slate-700">
+                    Waiting for host to start...
+                  </div>
+                )}
                 <button 
-                  onClick={startMultiplayerGame}
-                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-bold py-3 rounded-lg mt-4 transition-colors"
+                  onClick={() => {
+                    peerRef.current?.destroy();
+                    setMultiplayerRoom(null);
+                    setIsMultiplayer(false);
+                    setGameState('start');
+                  }}
+                  className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 rounded-lg transition-colors"
                 >
-                  Start Game
+                  Leave Room
                 </button>
               </div>
             )}
