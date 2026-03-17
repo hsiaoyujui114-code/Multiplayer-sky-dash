@@ -8,10 +8,10 @@ export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
     base: './',
-    root: 'src',
+    root: '.',
     build: {
-      outDir: '../',
-      emptyOutDir: false,
+      outDir: 'docs',
+      emptyOutDir: true,
     },
     plugins: [react(), tailwindcss(), viteSingleFile()],
     define: {
