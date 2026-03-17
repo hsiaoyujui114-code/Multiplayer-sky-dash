@@ -1,0 +1,5 @@
+{
+  "name": "Multiplayer Sky Dash",
+  "description": "A real-time multiplayer game where you compete to collect coins. Features single-player mode with different difficulties and a multiplayer arena.",
+  "requestFramePermissions": []
+}
